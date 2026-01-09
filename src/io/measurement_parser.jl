@@ -279,6 +279,8 @@ function write_measurements!(model::Type, data::Dict, pf_results::Dict, path::St
         write_cmp_measurements!(df, model, cmp_type, data, pf_results, very_basic_case, exclude = exclude, σ = σ_cmp)
     end
     _CSV.write(path, df)
+
+    @info "Measurement file written to $path by Senne"
 end
 """
     add_voltage_measurement!(model::Type, data::Dict, pf_results::Dict, path::String)
