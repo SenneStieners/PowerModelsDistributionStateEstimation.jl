@@ -90,23 +90,23 @@ function constraint_mc_current_balance_se(pm::_PMD.AbstractUnbalancedPowerModel,
     constraint_mc_current_balance_se(pm, nw, i, bus["terminals"], bus["grounded"], bus_arcs, bus_arcs_sw, bus_arcs_trans, bus_gens, bus_storage, bus_loads, bus_shunts)
 end
 
-function constraint_mc_current_balance_se(pm::_PMD.AbstractUnbalancedIVRModel, nw::Int, i::Int, terminals::Vector{Int}, grounded::Vector{Bool}, bus_arcs::Vector{Tuple{Tuple{Int,Int,Int},Vector{Int}}}, bus_arcs_sw::Vector{Tuple{Tuple{Int,Int,Int},Vector{Int}}}, bus_arcs_trans::Vector{Tuple{Tuple{Int,Int,Int},Vector{Int}}}, bus_gens::Vector{Tuple{Int,Vector{Int}}}, bus_storage::Vector{Tuple{Int,Vector{Int}}}, bus_loads::Vector{Tuple{Int,Vector{Int}}}, bus_shunts::Vector{Tuple{Int,Vector{Int}}})
+function constraint_mc_current_balance_se(pm::_PMD.IVRENPowerModel, nw::Int, i::Int, terminals::Vector{Int}, grounded::Vector{Bool}, bus_arcs::Vector{Tuple{Tuple{Int,Int,Int},Vector{Int}}}, bus_arcs_sw::Vector{Tuple{Tuple{Int,Int,Int},Vector{Int}}}, bus_arcs_trans::Vector{Tuple{Tuple{Int,Int,Int},Vector{Int}}}, bus_gens::Vector{Tuple{Int,Vector{Int}}}, bus_storage::Vector{Tuple{Int,Vector{Int}}}, bus_loads::Vector{Tuple{Int,Vector{Int}}}, bus_shunts::Vector{Tuple{Int,Vector{Int}}})
     #NB only difference with pmd is crd_bus replaced by crd, and same with cid
     vr = _PMD.var(pm, nw, :vr, i)
     vi = _PMD.var(pm, nw, :vi, i)
 
-    cr    = get(_PMD.var(pm, nw),    :cr, Dict()); _PMD._check_var_keys(cr, bus_arcs, "real current", "branch")
-    ci    = get(_PMD.var(pm, nw),    :ci, Dict()); _PMD._check_var_keys(ci, bus_arcs, "imaginary current", "branch")
+    cr    = get(_PMD.var(pm, nw),    :cr_bus, Dict()); _PMD._check_var_keys(cr, bus_arcs, "real current", "branch")
+    ci    = get(_PMD.var(pm, nw),    :ci_bus, Dict()); _PMD._check_var_keys(ci, bus_arcs, "imaginary current", "branch")
     crd   = get(_PMD.var(pm, nw),   :crd, Dict()); _PMD._check_var_keys(crd, bus_loads, "real current", "load")
     cid   = get(_PMD.var(pm, nw),   :cid, Dict()); _PMD._check_var_keys(cid, bus_loads, "imaginary current", "load")
     crg   = get(_PMD.var(pm, nw),   :crg, Dict()); _PMD._check_var_keys(crg, bus_gens, "real current", "generator")
     cig   = get(_PMD.var(pm, nw),   :cig, Dict()); _PMD._check_var_keys(cig, bus_gens, "imaginary current", "generator")
-    crs   = get(_PMD.var(pm, nw),   :crs, Dict()); _PMD._check_var_keys(crs, bus_storage, "real currentr", "storage")
+    crs   = get(_PMD.var(pm, nw),   :crs, Dict()); _PMD._check_var_keys(crs, bus_storage, "real current", "storage")
     cis   = get(_PMD.var(pm, nw),   :cis, Dict()); _PMD._check_var_keys(cis, bus_storage, "imaginary current", "storage")
     crsw  = get(_PMD.var(pm, nw),  :crsw, Dict()); _PMD._check_var_keys(crsw, bus_arcs_sw, "real current", "switch")
     cisw  = get(_PMD.var(pm, nw),  :cisw, Dict()); _PMD._check_var_keys(cisw, bus_arcs_sw, "imaginary current", "switch")
-    crt   = get(_PMD.var(pm, nw),   :crt, Dict()); _PMD._check_var_keys(crt, bus_arcs_trans, "real current", "transformer")
-    cit   = get(_PMD.var(pm, nw),   :cit, Dict()); _PMD._check_var_keys(cit, bus_arcs_trans, "imaginary current", "transformer")
+    crt   = get(_PMD.var(pm, nw),   :crt_bus, Dict()); _PMD._check_var_keys(crt, bus_arcs_trans, "real current", "transformer")
+    cit   = get(_PMD.var(pm, nw),   :cit_bus, Dict()); _PMD._check_var_keys(cit, bus_arcs_trans, "imaginary current", "transformer")
 
     Gs, Bs = _PMD._build_bus_shunt_matrices(pm, nw, terminals, bus_shunts)
 
@@ -394,4 +394,265 @@ function constraint_mc_power_balance_se(pm::_PMD.LPUBFDiagModel, nw::Int, i::Int
         )
         push!(cstr_q, cq)
    end
+end
+
+function variable_mc_transformer_tap(pm::_PMD.AbstractUnbalancedPowerModel;
+    nw::Int=_IM.nw_id_default, bounded::Bool=true, report::Bool=true
+)
+    p_oltc_ids = [id for (id, tr) in _PMD.ref(pm, nw, :transformer)
+                 if endswith(string(get(tr, "source_id", "")), ".2")]
+
+    # enkel trafos waarvoor NIET alles fixed is (dus Bool[0,0,0] -> variabelen; Bool[1,1,1] -> skip)
+    p_oltc_var_ids = [i for i in p_oltc_ids
+                      if !all(_PMD.ref(pm, nw, :transformer, i, "tm_fix"))]
+
+    tap = _PMD.var(pm, nw)[:tap] = Dict(i => JuMP.@variable(pm.model,
+        [p in 1:length(_PMD.ref(pm, nw, :transformer, i, "tm_set"))],
+        base_name="$(nw)_tm_$(i)",
+        start = _PMD.ref(pm, nw, :transformer, i, "tm_set")[p],
+    ) for i in p_oltc_var_ids)
+
+    if bounded
+        for tr_id in p_oltc_var_ids, p in 1:length(_PMD.ref(pm, nw, :transformer, tr_id, "tm_set"))
+            _PMD.set_lower_bound(_PMD.var(pm, nw)[:tap][tr_id][p], _PMD.ref(pm, nw, :transformer, tr_id, "tm_lb")[p])
+            _PMD.set_upper_bound(_PMD.var(pm, nw)[:tap][tr_id][p], _PMD.ref(pm, nw, :transformer, tr_id, "tm_ub")[p])
+        end
+    end
+
+    report && _IM.sol_component_value(pm, :pmd, nw, :transformer, :tap, p_oltc_var_ids, tap)
+end
+
+function constraint_mc_transformer_tap_time_invariant(pm::_PMD.AbstractUnbalancedPowerModel; nw_ref::Int=1)
+    nws = [n for (n, _) in _PMD.nws(pm)]
+    length(nws) <= 1 && return
+
+    tap_ref_dict = get(_PMD.var(pm, nw_ref), :tap, nothing)
+    tap_ref_dict === nothing && return
+
+    for n in nws
+        n == nw_ref && continue
+        tap_n_dict = get(_PMD.var(pm, n), :tap, nothing)
+        tap_n_dict === nothing && continue
+
+        for (tr, tap_ref) in tap_ref_dict
+            haskey(tap_n_dict, tr) || continue
+            tap_n = tap_n_dict[tr]
+            for p in 1:length(tap_ref)
+                JuMP.@constraint(pm.model, tap_n[p] == tap_ref[p])
+            end
+        end
+    end
+end
+
+
+
+
+"Calculates the tap scale factor for the non-dimensionalized equations."
+function calculate_tm_scale(trans::Dict{String,Any}, bus_fr::Dict{String,Any}, bus_to::Dict{String,Any})
+    tm_nom = trans["tm_nom"]
+
+    f_vbase = haskey(bus_fr, "vbase") ? bus_fr["vbase"] : bus_fr["base_kv"]
+    t_vbase = haskey(bus_to, "vbase") ? bus_to["vbase"] : bus_to["base_kv"]
+    config = trans["configuration"]
+
+    tm_scale = tm_nom*(t_vbase/f_vbase)
+    if config == DELTA
+        #TODO is this still needed?
+        tm_scale *= sqrt(3)
+    elseif config == "zig-zag"
+        error("Zig-zag not yet supported.")
+    end
+
+    return tm_nom
+end
+
+"Enforces equal tap across phases for transformer i (only if a tap variable exists)"
+function constraint_mc_transformer_tap_equal_phase(
+    pm::_PMD.AbstractUnbalancedPowerModel,
+    i::Int;
+    nw::Int=_IM.nw_id_default
+)
+    tap_dict = get(_PMD.var(pm, nw), :tap, nothing)
+    (tap_dict === nothing || !haskey(tap_dict, i)) && return
+
+    tap = tap_dict[i]  # vector (per phase)
+    for p in 2:length(tap)
+        JuMP.@constraint(pm.model, tap[p] == tap[1])
+    end
+end
+
+"Enforces tap of phase 1 to be fixed to a given value (only if a tap variable exists)"
+function constraint_mc_transformer_tap_test(
+    pm::_PMD.AbstractUnbalancedPowerModel,
+    i::Int;
+    nw::Int = _IM.nw_id_default
+)
+    tap_dict = get(_PMD.var(pm, nw), :tap, nothing)
+    (tap_dict === nothing || !haskey(tap_dict, i)) && return
+
+    tap = tap_dict[i]  # vector (per phase)
+
+    JuMP.@constraint(pm.model, tap[1] == 1.0000007878)
+end
+
+
+
+function constraint_mc_transformer_voltage(pm::_PMD.ExplicitNeutralModels, i::Int; nw::Int=_IM.nw_id_default, fix_taps::Bool=true)
+    transformer = _PMD.ref(pm, nw, :transformer, i)
+    f_bus = transformer["f_bus"]
+    t_bus = transformer["t_bus"]
+    f_idx = (i, f_bus, t_bus)
+    t_idx = (i, t_bus, f_bus)
+    configuration = transformer["configuration"]
+    f_connections = transformer["f_connections"]
+    t_connections = transformer["t_connections"]
+    tm_set = transformer["tm_set"]
+    tm_fixed = fix_taps ? ones(Bool, length(tm_set)) : transformer["tm_fix"]
+    tm_scale = calculate_tm_scale(transformer, _PMD.ref(pm, nw, :bus, f_bus), _PMD.ref(pm, nw, :bus, t_bus))
+
+    #TODO change data model
+    # there is redundancy in specifying polarity seperately on from and to side
+    #TODO change this once migrated to new data model
+    pol = transformer["polarity"]
+
+    if configuration == _PMD.WYE
+        _PMD.constraint_mc_transformer_voltage_yy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
+    elseif configuration == _PMD.DELTA
+        _PMD.constraint_mc_transformer_voltage_dy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
+    elseif configuration == "zig-zag"
+        error("Zig-zag not yet supported.")
+    end
+end
+
+function constraint_mc_transformer_voltage_yy(pm::_PMD.RectangularVoltageExplicitNeutralModels, nw::Int, trans_id::Int, f_bus::Int, t_bus::Int, f_idx::Tuple{Int,Int,Int}, t_idx::Tuple{Int,Int,Int}, f_connections::Vector{Int}, t_connections::Vector{Int}, pol::Int, tm_set::Vector{<:Real}, tm_fixed::Vector{Bool}, tm_scale::Real)
+    vr_fr_P = [_PMD.var(pm, nw, :vr, f_bus)[c] for c in f_connections[1:end-1]]
+    vi_fr_P = [_PMD.var(pm, nw, :vi, f_bus)[c] for c in f_connections[1:end-1]]
+    vr_fr_n = _PMD.var(pm, nw, :vr, f_bus)[f_connections[end]]
+    vi_fr_n = _PMD.var(pm, nw, :vi, f_bus)[f_connections[end]]
+    vr_to_P = [_PMD.var(pm, nw, :vr, t_bus)[c] for c in t_connections[1:end-1]]
+    vi_to_P = [_PMD.var(pm, nw, :vi, t_bus)[c] for c in t_connections[1:end-1]]
+    vr_to_n = _PMD.var(pm, nw, :vr, t_bus)[t_connections[end]]
+    vi_to_n = _PMD.var(pm, nw, :vi, t_bus)[t_connections[end]]
+    
+    # construct tm as a parameter or scaled variable depending on whether it is fixed or not
+    tm = [tm_fixed[idx] ? tm_set[idx] : _PMD.var(pm, nw, :tap, trans_id)[idx] for idx in 1:length(tm_fixed)]
+    scale = (tm_scale*pol).*tm
+
+    JuMP.@constraint(pm.model, (vr_fr_P.-vr_fr_n) .== scale.*(vr_to_P.-vr_to_n))
+    JuMP.@constraint(pm.model, (vi_fr_P.-vi_fr_n) .== scale.*(vi_to_P.-vi_to_n))
+end
+function constraint_mc_transformer_voltage_dy(pm::_PMD.RectangularVoltageExplicitNeutralModels, nw::Int, trans_id::Int, f_bus::Int, t_bus::Int, f_idx::Tuple{Int,Int,Int}, t_idx::Tuple{Int,Int,Int}, f_connections::Vector{Int}, t_connections::Vector{Int}, pol::Int, tm_set::Vector{<:Real}, tm_fixed::Vector{Bool}, tm_scale::Real)
+    vr_fr_P = [_PMD.var(pm, nw, :vr, f_bus)[c] for c in f_connections]
+    vi_fr_P = [_PMD.var(pm, nw, :vi, f_bus)[c] for c in f_connections]
+    vr_to_P = [_PMD.var(pm, nw, :vr, t_bus)[c] for c in t_connections[1:end-1]]
+    vi_to_P = [_PMD.var(pm, nw, :vi, t_bus)[c] for c in t_connections[1:end-1]]
+    vr_to_n = _PMD.var(pm, nw, :vr, t_bus)[t_connections[end]]
+    vi_to_n = _PMD.var(pm, nw, :vi, t_bus)[t_connections[end]]
+
+    # construct tm as a parameter or scaled variable depending on whether it is fixed or not
+    tm = [tm_fixed[idx] ? tm_set[idx] : _PMD.var(pm, nw, :tap, trans_id)[idx] for idx in 1:length(tm_fixed)]
+    scale = (tm_scale*pol).*tm
+
+    n_phases = length(tm)
+    Md = _get_delta_transformation_matrix(n_phases)
+
+    JuMP.@constraint(pm.model, Md*vr_fr_P .== scale.*(vr_to_P .- vr_to_n))
+    JuMP.@constraint(pm.model, Md*vi_fr_P .== scale.*(vi_to_P .- vi_to_n))
+end
+
+
+function constraint_mc_transformer_current(pm::_PMD.AbstractExplicitNeutralIVRModel, i::Int; nw::Int=_IM.nw_id_default, fix_taps::Bool=true)
+    # if ref(pm, nw_id_default, :conductors)!=3
+    #     error("Transformers only work with networks with three conductors.")
+    # end
+
+    transformer = _PMD.ref(pm, nw, :transformer, i)
+    f_bus = transformer["f_bus"]
+    t_bus = transformer["t_bus"]
+    f_idx = (i, f_bus, t_bus)
+    t_idx = (i, t_bus, f_bus)
+    configuration = transformer["configuration"]
+    f_connections = transformer["f_connections"]
+    t_connections = transformer["t_connections"]
+    tm_set = transformer["tm_set"]
+    tm_fixed = fix_taps ? ones(Bool, length(tm_set)) : transformer["tm_fix"]
+    tm_scale = calculate_tm_scale(transformer, _PMD.ref(pm, nw, :bus, f_bus), _PMD.ref(pm, nw, :bus, t_bus))
+
+    #TODO change data model
+    # there is redundancy in specifying polarity seperately on from and to side
+    #TODO change this once migrated to new data model
+    pol = transformer["polarity"]
+    if configuration == _PMD.WYE
+        constraint_mc_transformer_current_yy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
+    elseif configuration == _PMD.DELTA
+        constraint_mc_transformer_current_dy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
+    elseif configuration == "zig-zag"
+        error("Zig-zag not yet supported.")
+    end
+end
+
+function constraint_mc_transformer_current_yy(pm::_PMD.AbstractExplicitNeutralIVRModel, nw::Int, trans_id::Int, f_bus::Int, t_bus::Int, f_idx::Tuple{Int,Int,Int}, t_idx::Tuple{Int,Int,Int}, f_connections::Vector{Int}, t_connections::Vector{Int}, pol::Int, tm_set::Vector{<:Real}, tm_fixed::Vector{Bool}, tm_scale::Real)
+    cr_fr_P = _PMD.var(pm, nw, :crt, f_idx)
+    ci_fr_P = _PMD.var(pm, nw, :cit, f_idx)
+    cr_to_P = _PMD.var(pm, nw, :crt, t_idx)
+    ci_to_P = _PMD.var(pm, nw, :cit, t_idx)
+    
+    # construct tm as a parameter or scaled variable depending on whether it is fixed or not
+    tm = [tm_fixed[idx] ? tm_set[idx] : _PMD.var(pm, nw, :tap, trans_id)[idx] for idx in 1:length(tm_fixed)]
+    scale = (tm_scale*pol).*tm
+
+    JuMP.@constraint(pm.model, scale.*cr_fr_P .+ cr_to_P .== 0)
+    JuMP.@constraint(pm.model, scale.*ci_fr_P .+ ci_to_P .== 0)
+
+    _PMD.var(pm, nw, :crt_bus)[f_idx] = _merge_bus_flows(pm, [cr_fr_P..., -sum(cr_fr_P)], f_connections)
+    _PMD.var(pm, nw, :cit_bus)[f_idx] = _merge_bus_flows(pm, [ci_fr_P..., -sum(ci_fr_P)], f_connections)
+    _PMD.var(pm, nw, :crt_bus)[t_idx] = _merge_bus_flows(pm, [cr_to_P..., -sum(cr_to_P)], t_connections)
+    _PMD.var(pm, nw, :cit_bus)[t_idx] = _merge_bus_flows(pm, [ci_to_P..., -sum(ci_to_P)], t_connections)
+end
+
+function constraint_mc_transformer_current_dy(pm::_PMD.AbstractExplicitNeutralIVRModel, nw::Int, trans_id::Int, f_bus::Int, t_bus::Int, f_idx::Tuple{Int,Int,Int}, t_idx::Tuple{Int,Int,Int}, f_connections::Vector{Int}, t_connections::Vector{Int}, pol::Int, tm_set::Vector{<:Real}, tm_fixed::Vector{Bool}, tm_scale::Real)
+    cr_fr_P = _PMD.var(pm, nw, :crt, f_idx)
+    ci_fr_P = _PMD.var(pm, nw, :cit, f_idx)
+    cr_to_P = _PMD.var(pm, nw, :crt, t_idx)
+    ci_to_P = _PMD.var(pm, nw, :cit, t_idx)
+    
+    # construct tm as a parameter or scaled variable depending on whether it is fixed or not
+    tm = [tm_fixed[idx] ? tm_set[idx] : _PMD.var(pm, nw, :tap, trans_id)[idx] for idx in 1:length(tm_fixed)]
+    scale = (tm_scale*pol).*tm
+
+    n_phases = length(tm)
+    Md = _get_delta_transformation_matrix(n_phases)
+
+    JuMP.@constraint(pm.model, scale.*cr_fr_P .+ cr_to_P .== 0)
+    JuMP.@constraint(pm.model, scale.*ci_fr_P .+ ci_to_P .== 0)
+
+    _PMD.var(pm, nw, :crt_bus)[f_idx] = _merge_bus_flows(pm, Md'*cr_fr_P, f_connections)
+    _PMD.var(pm, nw, :cit_bus)[f_idx] = _merge_bus_flows(pm, Md'*ci_fr_P, f_connections)
+    _PMD.var(pm, nw, :crt_bus)[t_idx] = _merge_bus_flows(pm, [cr_to_P..., -sum(cr_to_P)], t_connections)
+    _PMD.var(pm, nw, :cit_bus)[t_idx] = _merge_bus_flows(pm, [ci_to_P..., -sum(ci_to_P)], t_connections)
+end
+
+"Merges flow variables that enter the same terminals, i.e. multiple neutrals of an underground cable connected to same neutral terminal"
+function _merge_bus_flows(pm::_PMD.AbstractExplicitNeutralIVRModel, flows::Vector, connections::Vector)::JuMP.Containers.DenseAxisArray
+    flows_merged = []
+    conns_unique = unique(connections)
+    for t in conns_unique
+        idxs = findall(connections.==t)
+        flows_t = flows[idxs]
+        if length(flows_t)==1
+            flows_merged_t = flows_t[1]
+        else
+            flows_merged_t = sum(flows_t)
+        end
+        push!(flows_merged, flows_merged_t)
+    end
+    JuMP.Containers.DenseAxisArray(flows_merged, conns_unique)
+end
+
+"creates a delta transformation matrix"
+function _get_delta_transformation_matrix(n_phases::Int)::Matrix{Int}
+    @assert(n_phases>2, "We only define delta transforms for three and more conductors.")
+    Md = LinearAlgebra.diagm(0=>fill(1, n_phases), 1=>fill(-1, n_phases-1))
+    Md[end,1] = -1
+    return Md
 end

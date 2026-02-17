@@ -5,7 +5,6 @@ function solve_acp_mc_se_oltc(data::Union{Dict{String,<:Any},String}, solver; kw
     return solve_mc_se_oltc(data, _PMD.ACPUPowerModel, solver; kwargs...)
 end
 
-"Internal solver function for OLTC SE"
 function solve_mc_se_oltc(data::Union{Dict{String,<:Any},String}, model_type::Type, solver; kwargs...)
     if haskey(data["se_settings"], "criterion")
         _PMDSE.assign_unique_individual_criterion!(data)
@@ -16,44 +15,119 @@ function solve_mc_se_oltc(data::Union{Dict{String,<:Any},String}, model_type::Ty
     if !haskey(data["se_settings"], "number_of_gaussian")
         data["se_settings"]["number_of_gaussian"] = 10
     end
-    return _PMD.solve_mc_model(data, model_type, solver, build_mc_se_oltc; kwargs...)
+
+    # --- KEY FIX: force multinetwork solving when data has "nw" ---
+    is_mn = haskey(data, "nw") || get(data, "multinetwork", false) == true
+
+    if is_mn
+        return _PMD.solve_mc_model(data, model_type, solver, build_mc_se_oltc; multinetwork=true, kwargs...)
+    else
+        return _PMD.solve_mc_model(data, model_type, solver, build_mc_se_oltc; kwargs...)
+    end
 end
 
 "Specification of the SE problem including Transformer Taps as variables"
-function build_mc_se_oltc(pm::_PMD.AbstractUnbalancedPowerModel)
+function build_mc_se_oltc(pm::_PMD.IVRENPowerModel)
+    
+    # Time varying variables
+    for (n, _) in _PMD.nws(pm)
+        # Variables
+        variable_mc_bus_voltage(pm, nw=n, bounded = true)
+        _PMD.variable_mc_branch_current(pm, nw=n, bounded = true)
+        _PMD.variable_mc_generator_current(pm, nw=n, bounded = true)
+        _PMD.variable_mc_transformer_current(pm, nw=n, bounded = true)
+        variable_mc_load_current(pm, nw=n, bounded = true)    
+        variable_mc_residual(pm, nw=n, bounded = true)
+        variable_mc_measurement(pm, nw=n, bounded = false)
+        variable_mc_transformer_tap(pm, nw=n, bounded = true)    # --- ADDED: Tap Estimation Variable ---
 
-    # Variables
-    _PMDSE.variable_mc_bus_voltage(pm, bounded = true)
-    _PMD.variable_mc_branch_power(pm; bounded = true)
-    _PMD.variable_mc_transformer_power(pm; bounded = true)
-    _PMD.variable_mc_oltc_transformer_tap(pm)    # --- ADDED: Tap Estimation Variable ---
-    _PMD.variable_mc_generator_power(pm; bounded = true)
-    variable_mc_load(pm; report = true)
-    variable_mc_residual(pm; bounded = true)
-    variable_mc_measurement(pm; bounded = false)
+    end
+
+    
 
     # Constraints
-    for (i,gen) in _PMD.ref(pm, :gen)
-        _PMD.constraint_mc_generator_power(pm, i)
-    end
-    for (i,bus) in _PMD.ref(pm, :ref_buses)
-        @assert bus["bus_type"] == 3
-        _PMD.constraint_mc_theta_ref(pm, i)
-    end
-    for (i,bus) in _PMD.ref(pm, :bus)
-        _PMDSE.constraint_mc_power_balance_se(pm, i)
-    end
-    for (i,branch) in _PMD.ref(pm, :branch)
-        _PMD.constraint_mc_ohms_yt_from(pm, i)
-        _PMD.constraint_mc_ohms_yt_to(pm,i)
-    end
-    for (i,meas) in _PMD.ref(pm, :meas)
-        constraint_mc_residual(pm, i)
+    constraint_mc_transformer_tap_time_invariant(pm)   # --- ADDED: Tap Time-Invariant Constraint ---
+    # Time varying constraints
+    for (n, _) in _PMD.nws(pm)
+        for i in _PMD.ids(pm, n, :bus)
+            if i in _PMD.ids(pm, n, :ref_buses)
+            _PMD.constraint_mc_voltage_reference(pm, i, nw = n)  # vm is not fixed
+            end
+        end
+        
+        for id in _PMD.ids(pm, n, :gen)
+            constraint_mc_generator_current_se(pm, id, nw = n)
+        end
+#
+        for i in _PMD.ids(pm, n, :transformer)
+            constraint_mc_transformer_tap_equal_phase(pm, i, nw = n)
+            #constraint_mc_transformer_tap_test(pm, i)   # --- ADDED: Tap Constraint ---
+        end
+        for i in _PMD.ids(pm, n, :transformer)
+            constraint_mc_transformer_voltage(pm, i,fix_taps=false, nw = n)  # --- MODIFIED: fix_taps=false ---
+            constraint_mc_transformer_current(pm, i,fix_taps=false, nw = n)# --- MODIFIED: fix_taps=false 
+        end
+
+
+        for i in _PMD.ids(pm, n, :branch)
+            _PMD.constraint_mc_current_from(pm, i, nw = n)
+            _PMD.constraint_mc_current_to(pm, i, nw = n)
+            _PMD.constraint_mc_bus_voltage_drop(pm, i, nw = n)
+        end
+#
+        for (i,bus) in _PMD.ref(pm, n, :bus)
+            constraint_mc_current_balance_se(pm, i, nw = n)
+            #constraint_mc_neutral_grounding(pm, i)  #TODO: make it only grounded if load is grounded
+        end
+
+        for (i,meas) in _PMD.ref(pm, n, :meas)
+            constraint_mc_residual(pm, i, nw = n)
+        end
     end
 
-    for i in _PMD.ids(pm, :transformer)
-        _PMD.constraint_mc_transformer_power(pm, i)
-    end
+        
+    # Variables
+    #variable_mc_bus_voltage(pm, bounded = true)
+    #_PMD.variable_mc_branch_current(pm, bounded = true)
+    #_PMD.variable_mc_generator_current(pm, bounded = true)
+    #_PMD.variable_mc_transformer_current(pm, bounded = true)
+    #variable_mc_load_current(pm, bounded = true)    
+    #variable_mc_residual(pm, bounded = true)
+    #variable_mc_measurement(pm, bounded = false)
+    #variable_mc_transformer_tap(pm,  bounded = true)    # --- ADDED: Tap Estimation Variable ---
+    # Constraints
+    
+    
+    #for i in _PMD.ids(pm, :bus)
+    #    if i in _PMD.ids(pm, :ref_buses)
+    #    _PMD.constraint_mc_voltage_reference(pm, i)  # vm is not fixed
+    #    end
+    #end
+        
+    #for id in _PMD.ids(pm, :gen)
+     #       constraint_mc_generator_current_se(pm, id)
+    #end
+
+    #for i in _PMD.ids(pm, :transformer)
+    #    constraint_mc_transformer_tap_equal_phase(pm, i)
+        #constraint_mc_transformer_tap_test(pm, i)   # --- ADDED: Tap Constraint ---
+    #end
+    #for i in _PMD.ids(pm, :transformer)
+    #    constraint_mc_transformer_voltage(pm, i,fix_taps=false)  # --- MODIFIED: fix_taps=false ---
+    #    constraint_mc_transformer_current(pm, i,fix_taps=false) # --- MODIFIED: fix_taps=false 
+    #end
+    #for i in _PMD.ids(pm, :branch)
+    #    _PMD.constraint_mc_current_from(pm, i)
+     #   _PMD.constraint_mc_current_to(pm, i)
+     #   _PMD.constraint_mc_bus_voltage_drop(pm, i)
+    #end
+    #for (i,bus) in _PMD.ref(pm, :bus)
+    #    constraint_mc_current_balance_se(pm, i)
+    #    #constraint_mc_neutral_grounding(pm, i)  #TODO: make it only grounded if load is grounded
+    #end
+    #for (i,meas) in _PMD.ref(pm, :meas)
+    #    constraint_mc_residual(pm, i)
+    #end
 
     # Objective
     objective_mc_se(pm)
