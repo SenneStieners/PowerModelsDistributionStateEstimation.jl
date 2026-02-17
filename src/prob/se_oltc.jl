@@ -40,7 +40,7 @@ function build_mc_se_oltc(pm::_PMD.IVRENPowerModel)
         variable_mc_residual(pm, nw=n, bounded = true)
         variable_mc_measurement(pm, nw=n, bounded = false)
         variable_mc_transformer_tap(pm, nw=n, bounded = true)    # --- ADDED: Tap Estimation Variable ---
-
+        _PMD.variable_mc_switch_current(pm, nw=n, bounded = true)  # --- ADDED: Switch Current Variable ---
     end
 
     

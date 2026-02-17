@@ -455,15 +455,15 @@ function calculate_tm_scale(trans::Dict{String,Any}, bus_fr::Dict{String,Any}, b
     t_vbase = haskey(bus_to, "vbase") ? bus_to["vbase"] : bus_to["base_kv"]
     config = trans["configuration"]
 
-    tm_scale = tm_nom*(t_vbase/f_vbase)
+    tm_scale = tm_nom
     if config == DELTA
         #TODO is this still needed?
-        tm_scale *= sqrt(3)
+        #tm_scale *= sqrt(3)
     elseif config == "zig-zag"
         error("Zig-zag not yet supported.")
     end
 
-    return tm_nom
+    return tm_scale
 end
 
 "Enforces equal tap across phases for transformer i (only if a tap variable exists)"
@@ -516,9 +516,9 @@ function constraint_mc_transformer_voltage(pm::_PMD.ExplicitNeutralModels, i::In
     pol = transformer["polarity"]
 
     if configuration == _PMD.WYE
-        _PMD.constraint_mc_transformer_voltage_yy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
+        constraint_mc_transformer_voltage_yy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
     elseif configuration == _PMD.DELTA
-        _PMD.constraint_mc_transformer_voltage_dy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
+        constraint_mc_transformer_voltage_dy(pm, nw, i, f_bus, t_bus, f_idx, t_idx, f_connections, t_connections, pol, tm_set, tm_fixed, tm_scale)
     elseif configuration == "zig-zag"
         error("Zig-zag not yet supported.")
     end

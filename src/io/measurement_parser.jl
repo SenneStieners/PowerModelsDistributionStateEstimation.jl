@@ -284,158 +284,6 @@ function write_measurements!(model::Type, data::Dict, pf_results::Dict, path::St
 
     @info "Measurement file written to $path by Senne"
 end
-function write_bus_vrvi_measurements!(
-    model::Type,
-    data::Dict{String,Any},
-    pf_results::Dict{String,Any},
-    path::String;
-    exclude::Vector{String}=String[],
-    σ::Union{Dict, Float64}=0.005,
-    dst::String="Normal",
-    cmp_types_with_bus::Vector{String}=["load","gen"],
-    skip_if_already_in_csv::Bool=true
-)
-    # 1) CSV inlezen of nieuw df maken
-    df = isfile(path) ? _CSV.read(path, _DFS.DataFrame) : init_measurements()
-
-    # 2) sigma afhandeling (scalar of Dict)
-    σ_vr = isa(σ, Dict) ? get(σ, "vr", get(σ, "bus", 0.005)) : σ
-    σ_vi = isa(σ, Dict) ? get(σ, "vi", get(σ, "bus", 0.005)) : σ
-
-    # helper: maak "[a, b, c]" string
-    vecstr(v) = "[" * join(string.(v), ", ") * "]"
-
-    # ----------------------------
-    # A) Bouw set van bus-IDs die al door write_cmp_measurements! worden meegenomen
-    # ----------------------------
-    skip_bus_ids = Set{String}()
-
-    haskey(pf_results, "solution") || error("pf_results has no key \"solution\"")
-
-    for ct in cmp_types_with_bus
-        haskey(data, ct) || continue
-        haskey(pf_results["solution"], ct) || continue
-
-        for (cmp_id, _cmp_res) in pf_results["solution"][ct]
-            haskey(data[ct], cmp_id) || continue
-            cmp_data = data[ct][cmp_id]
-
-            bus_key = "$(ct)_bus"
-            haskey(cmp_data, bus_key) || continue
-            push!(skip_bus_ids, string(cmp_data[bus_key]))
-        end
-    end
-
-    # ----------------------------
-    # B) Optioneel: skip als vr/vi al in CSV staat
-    # ----------------------------
-    function already_has_bus_meas(df::_DFS.DataFrame, bus_int::Int, var::String)
-        cols = propertynames(df)  # Symbol[]
-        (:cmp_type in cols && :cmp_id in cols && :meas_var in cols) || return false
-
-        for r in eachrow(df)
-            r.cmp_type == "bus" || continue
-            r.cmp_id == bus_int || continue
-            occursin(var, String(r.meas_var)) || continue
-            return true
-        end
-        return false
-    end
-
-    # ----------------------------
-    # C) Loop over bussen en schrijf vr/vi, behalve de skip-bussen
-    # ----------------------------
-    for (bus_id, bus_data) in data["bus"]
-        bus_int = tryparse(Int, bus_id)
-        bus_int === nothing && continue
-
-        # skip bussen die al via load/gen in write_cmp_measurements! zaten
-        if bus_id in skip_bus_ids
-            continue
-        end
-
-        # moet bestaan in PF oplossing
-        haskey(pf_results["solution"], "bus") || error("pf_results[\"solution\"] has no key \"bus\"")
-        haskey(pf_results["solution"]["bus"], bus_id) || continue
-        bus_res = pf_results["solution"]["bus"][bus_id]
-
-        # terminals / phases bepalen
-        terminals = get(bus_data, "terminals", get(bus_data, "connections", Int[]))
-        isempty(terminals) && continue
-
-        # neutral eruit indien beschikbaar
-        if @isdefined(_N_IDX)
-            terminals = setdiff(terminals, [_N_IDX])
-        end
-        isempty(terminals) && continue
-
-        # config (zoals jij deed)
-        config = get_configuration("bus", bus_data)
-
-        # indices in PF arrays: meestal in volgorde van bus_data["terminals"]
-        function pick_vals(arr)
-            vals = Float64[]
-            bt = get(bus_data, "terminals", terminals)
-            for ph in terminals
-                k = findfirst(==(ph), bt)
-                k === nothing && continue
-                push!(vals, arr[k])
-            end
-            return vals
-        end
-
-        phase_str = vecstr(terminals)
-
-        # -------- VR (1 rij per bus) --------
-        if !("vr" in exclude) && haskey(bus_res, "vr")
-            if !(skip_if_already_in_csv && already_has_bus_meas(df, bus_int, "vr"))
-                vr_vals = pick_vals(bus_res["vr"])
-                σ_vec = get_sigma(σ_vr, "vr", terminals)
-
-                row = Any[
-                    length(df.meas_id) + 1,  # meas_id
-                    "bus",                   # cmp_type
-                    bus_int,                 # cmp_id (Int)
-                    config,                  # meas_type
-                    reduce_name("vr"),       # meas_var
-                    phase_str,               # phase
-                    dst,                     # dst
-                    vecstr(vr_vals),         # par_1
-                    vecstr(σ_vec),           # par_2
-                    missing, missing, missing
-                ]
-                push!(df, row; promote=true)
-            end
-        end
-
-        # -------- VI (1 rij per bus) --------
-        if !("vi" in exclude) && haskey(bus_res, "vi")
-            if !(skip_if_already_in_csv && already_has_bus_meas(df, bus_int, "vi"))
-                vi_vals = pick_vals(bus_res["vi"])
-                σ_vec = get_sigma(σ_vi, "vi", terminals)
-
-                row = Any[
-                    length(df.meas_id) + 1,
-                    "bus",
-                    bus_int,
-                    config,
-                    reduce_name("vi"),
-                    phase_str,
-                    dst,
-                    vecstr(vi_vals),
-                    vecstr(σ_vec),
-                    missing, missing, missing
-                ]
-                push!(df, row; promote=true)
-            end
-        end
-    end
-
-    _CSV.write(path, df)
-    @info "Bus VR/VI measurements appended to $path (skipped buses connected to $(cmp_types_with_bus))"
-    return df
-end
-
 
 """
     add_voltage_measurement!(model::Type, data::Dict, pf_results::Dict, path::String)
@@ -538,91 +386,194 @@ checks if load/gen data has a given distribution parameter
 has_par(df, row, par_num) =
       "par_$(par_num)" ∈ names(df) ? df[row, Symbol("par_$(par_num)") ] : missing
 
+function append_lv_bus_vrvi!(
+    csv_path::String,
+    data::Dict,
+    pf::Dict;
+    tr_ids::Vector{String},
+    σ_bus::Float64 = 0.00334,
+    drop_neutral::Bool = false   # <<< default nu false: we keep neutral/ground
+)
+    df = _CSV.read(csv_path, _DFS.DataFrame)
 
+    vecstr(v) = "[" * join(string.(v), ", ") * "]"
 
-function add_vr!(data::Dict, pf_res::Dict, σ_dict::Dict, sample_error::Bool=true)
-    m_idx = isempty(data["meas"]) ? 1 : maximum(parse.(Int, keys(data["meas"]))) + 1
+    # ---- meas_id next ----
+    next_id_int = isempty(df) ? 1 : (maximum(Int.(df.meas_id)) + 1)
+    meas_id_T = eltype(df.meas_id)
+    meas_id_val(i::Int) = meas_id_T <: Integer ? i : string(i)
 
-    # bussen die al metingen kregen via write_measurements! (bus van gen + load)
-    done_bus = Set{String}()
-    for (_, ld) in data["load"]
-        push!(done_bus, string(ld["load_bus"]))
-    end
-    for (_, gn) in data["gen"]
-        push!(done_bus, string(gn["gen_bus"]))
-    end
-
-    for (b, bus) in pf_res["solution"]["bus"]
-        # enkel bussen die NIET al gedaan zijn
-        if b ∉ done_bus
-            vr = bus["vr"]   # already rectangular
-
-            # --- scalar vr ---
-            if isa(vr, Number)
-                σ = maximum([abs(vr * σ_dict["vr"] / 3), σ_dict["vr"]/3])
-                μ = sample_error ? _RAN.rand(_DST.Normal(vr, σ)) : vr
-                dst = [_DST.Normal(μ, σ)]
-
-            # --- per-phase vr vector ---
-            else
-                σs = [maximum([abs(v * σ_dict["vr"] / 3), σ_dict["vr"]/3]) for v in vr]
-                μs = [
-                    sample_error ? _RAN.rand(_DST.Normal(v, σs[i])) : v
-                    for (i, v) in enumerate(vr)
-                ]
-                dst = _DST.Normal.(μs, σs)
-            end
-
-            data["meas"]["$m_idx"] = Dict(
-                "cmp"    => :bus,
-                "cmp_id" => parse(Int, b),
-                "var"    => :vr,
-                "dst"    => dst
-            )
-            m_idx += 1
+    # ---- cmp_id typing ----
+    cmp_id_T = eltype(df.cmp_id)
+    function cmp_id_val(bus_id_str::AbstractString)
+        if cmp_id_T <: Integer
+            x = tryparse(Int, bus_id_str)
+            x === nothing && error("cmp_id column is Int, but bus id '$bus_id_str' is not parseable to Int")
+            return x
+        else
+            return string(bus_id_str)
         end
     end
-end
-function add_vi!(data::Dict, pf_res::Dict, σ_dict::Dict, sample_error::Bool=true)
-    m_idx = isempty(data["meas"]) ? 1 : maximum(parse.(Int, keys(data["meas"]))) + 1
 
-    # bussen die al metingen kregen via write_measurements! (bus van gen + load)
-    done_bus = Set{String}()
-    for (_, ld) in data["load"]
-        push!(done_bus, string(ld["load_bus"]))
-    end
-    for (_, gn) in data["gen"]
-        push!(done_bus, string(gn["gen_bus"]))
+    # ---- LV bus helper: compare f_vbase vs t_vbase ----
+    function lv_bus_id(tr::Dict)::String
+        fv = Float64(tr["f_vbase"])
+        tv = Float64(tr["t_vbase"])
+        return fv <= tv ? string(tr["f_bus"]) : string(tr["t_bus"])
     end
 
-    for (b, bus) in pf_res["solution"]["bus"]
-        if b ∉ done_bus
-            vi = bus["vi"]   # imaginary component
-
-            # --- scalar vi ---
-            if isa(vi, Number)
-                σ = maximum([abs(vi * σ_dict["vi"] / 3), σ_dict["vi"]/3])
-                μ = sample_error ? _RAN.rand(_DST.Normal(vi, σ)) : vi
-                dst = [_DST.Normal(μ, σ)]
-
-            # --- per-phase vi vector ---
-            else
-                σs = [maximum([abs(v * σ_dict["vi"] / 3), σ_dict["vi"]/3]) for v in vi]
-                μs = [
-                    sample_error ? _RAN.rand(_DST.Normal(v, σs[i])) : v
-                    for (i, v) in enumerate(vi)
-                ]
-                dst = _DST.Normal.(μs, σs)
-            end
-
-            data["meas"]["$m_idx"] = Dict(
-                "cmp"    => :bus,
-                "cmp_id" => parse(Int, b),
-                "var"    => :vi,
-                "dst"    => dst
-            )
-            m_idx += 1
+    # helper: expand pf vector to match terminals length (pads missing neutrals with 0.0)
+    function expand_to_terminals(vals::AbstractVector, terminals::AbstractVector{<:Integer})
+        nT = length(terminals)
+        nV = length(vals)
+        if nV == nT
+            return Float64.(vals)
+        elseif nV < nT
+            # pad with zeros for extra terminals (neutral/ground)
+            return vcat(Float64.(vals), zeros(nT - nV))
+        else
+            # shouldn't happen; truncate to be safe
+            return Float64.(vals[1:nT])
         end
     end
+
+    for tr_id in tr_ids
+        tr = data["transformer"][tr_id]
+        b_str = lv_bus_id(tr)
+
+        # TAKE ALL terminals unless explicitly dropping neutrals
+        terminals = data["bus"][b_str]["terminals"]
+        phases = drop_neutral ? filter(t -> t != 4 && t != 5, terminals) : terminals
+        isempty(phases) && continue
+
+        # skip duplicates
+        if repeated_measurement(df, b_str, "bus", phases)
+            continue
+        end
+
+        for meas_var in ("vr", "vi")
+            pf_vec = pf["solution"]["bus"][b_str][meas_var]
+
+            # match length to phases (terminals)
+            vals = expand_to_terminals(pf_vec, phases)
+
+            # sigma vector same length
+            sigs = get_sigma(σ_bus, meas_var, phases)
+
+            row = Any[
+                meas_id_val(next_id_int),
+                "bus",
+                cmp_id_val(b_str),
+                "G",
+                meas_var,
+                string(phases),
+                "Normal",
+                vecstr(vals),
+                vecstr(sigs),
+                missing, missing, missing
+            ]
+
+            push!(df, row; promote=true)
+            next_id_int += 1
+        end
+    end
+
+    _CSV.write(csv_path, df)
+    return csv_path
 end
 
+function append_all_bus_vrvi!(
+    csv_path::String,
+    data::Dict,
+    pf::Dict;
+    σ_bus::Float64 = 0.00334,
+    drop_neutral::Bool = false   # default: keep neutral/ground
+)
+    df = _CSV.read(csv_path, _DFS.DataFrame)
+
+    vecstr(v) = "[" * join(string.(v), ", ") * "]"
+
+    # ---- meas_id next ----
+    next_id_int = isempty(df) ? 1 : (maximum(Int.(df.meas_id)) + 1)
+    meas_id_T = eltype(df.meas_id)
+    meas_id_val(i::Int) = meas_id_T <: Integer ? i : string(i)
+
+    # ---- cmp_id typing ----
+    cmp_id_T = eltype(df.cmp_id)
+    function cmp_id_val(bus_id_str::AbstractString)
+        if cmp_id_T <: Integer
+            x = tryparse(Int, bus_id_str)
+            x === nothing && error("cmp_id column is Int, but bus id '$bus_id_str' is not parseable to Int")
+            return x
+        else
+            return string(bus_id_str)
+        end
+    end
+
+    # helper: expand pf vector to match terminals length (pads missing neutrals with 0.0)
+    function expand_to_terminals(vals::AbstractVector, terminals::AbstractVector{<:Integer})
+        nT = length(terminals)
+        nV = length(vals)
+        if nV == nT
+            return Float64.(vals)
+        elseif nV < nT
+            return vcat(Float64.(vals), zeros(nT - nV))
+        else
+            return Float64.(vals[1:nT])
+        end
+    end
+
+    # iter over ALL buses present in pf (safe default)
+    bus_ids = sort(collect(keys(pf["solution"]["bus"]))) do a, b
+        ia = tryparse(Int, String(a)); ib = tryparse(Int, String(b))
+        ia === nothing || ib === nothing ? String(a) < String(b) : ia < ib
+    end
+
+    for b_str_any in bus_ids
+        b_str = string(b_str_any)
+
+        # terminals from data (source of truth for phases)
+        haskey(data["bus"], b_str) || continue
+        terminals = data["bus"][b_str]["terminals"]
+        phases = drop_neutral ? filter(t -> t != 4 && t != 5, terminals) : terminals
+        isempty(phases) && continue
+
+        # skip duplicates
+        if repeated_measurement(df, b_str, "bus", phases)
+            continue
+        end
+
+        # need vr/vi in pf; if not present, skip this bus
+        bus_sol = pf["solution"]["bus"][b_str]
+        (haskey(bus_sol, "vr") && haskey(bus_sol, "vi")) || continue
+
+        for meas_var in ("vr", "vi")
+            pf_vec = bus_sol[meas_var]
+
+            # match length to phases/terminals
+            vals = expand_to_terminals(pf_vec, phases)
+
+            # sigma vector same length
+            sigs = get_sigma(σ_bus, meas_var, phases)
+
+            row = Any[
+                meas_id_val(next_id_int),
+                "bus",
+                cmp_id_val(b_str),
+                "G",
+                meas_var,
+                string(phases),
+                "Normal",
+                vecstr(vals),
+                vecstr(sigs),
+                missing, missing, missing
+            ]
+
+            push!(df, row; promote=true)
+            next_id_int += 1
+        end
+    end
+
+    _CSV.write(csv_path, df)
+    return csv_path
+end
