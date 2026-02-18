@@ -656,3 +656,103 @@ function _get_delta_transformation_matrix(n_phases::Int)::Matrix{Int}
     Md[end,1] = -1
     return Md
 end
+
+
+"Probeert de transformer-id te vinden die bij deze virtual branch hoort."
+function _find_transformer_for_virtual_branch(pm, nw::Int, branch::Dict{String,Any})
+    bname = string(get(branch, "name", ""))
+
+    # verwacht bv: _virtual_branch.transformer.tx3170_1
+    m = match(r"_virtual_branch\.transformer\.([^_]+)_", bname)
+    if m === nothing
+        # fallback: probeer op source_id
+        bsrc = string(get(branch, "source_id", ""))
+        m = match(r"_virtual_branch\.transformer\.([^_]+)_", bsrc)
+        m === nothing && return nothing
+    end
+
+    tag = m.captures[1]   # bv "tx3170"
+
+    # zoek transformer met tag in name of source_id
+    for (tr_id, tr) in _PMD.ref(pm, nw, :transformer)
+        trname = string(get(tr, "name", ""))
+        trsrc  = string(get(tr, "source_id", ""))
+        if occursin(tag, trname) || occursin(tag, trsrc)
+            return tr_id
+        end
+    end
+
+    return nothing
+end
+
+
+
+function constraint_mc_bus_voltage_drop(pm::_PMD.AbstractUnbalancedPowerModel, i::Int; nw::Int=_IM.nw_id_default)::Nothing
+    branch = _PMD.ref(pm, nw, :branch, i)
+
+    r0 = branch["br_r"]
+    x0 = branch["br_x"]
+
+    bname = string(get(branch, "name", ""))
+    is_virtual_tr = startswith(bname, "_virtual_branch.transformer.") && endswith(bname, "_1")
+
+    # default: constant r,x (zoals PMD)
+    r_use = r0
+    x_use = x0
+
+    if is_virtual_tr
+        tr_id = get(branch, "transformer_id", nothing)
+        tr_id === nothing && (tr_id = _find_transformer_for_virtual_branch(pm, nw, branch))
+
+        if tr_id !== nothing
+            tr = _PMD.ref(pm, nw, :transformer, tr_id)
+
+            tap_dict = get(_PMD.var(pm, nw), :tap, nothing)
+
+            tap1 = (tap_dict !== nothing && haskey(tap_dict, tr_id)) ? tap_dict[tr_id][1] : tr["tm_set"][1]
+
+            # Als tap1 een JuMP variabele/expression is -> NL tap-aware constraint
+            if tap1 isa JuMP.AbstractJuMPScalar
+                constraint_mc_bus_voltage_drop_tap(pm, nw, i,
+                    branch["f_bus"], branch["t_bus"], (i, branch["f_bus"], branch["t_bus"]),
+                    branch["f_connections"], branch["t_connections"],
+                    r0, x0, tap1
+                )
+                return nothing
+            end
+        end
+    end
+    _PMD.constraint_mc_bus_voltage_drop(pm, nw, i,
+        branch["f_bus"], branch["t_bus"], (i, branch["f_bus"], branch["t_bus"]),
+        branch["f_connections"], branch["t_connections"],
+        r_use, x_use
+    )
+
+    return nothing
+end
+
+function constraint_mc_bus_voltage_drop_tap(pm::_PMD.AbstractExplicitNeutralIVRModel,
+    nw::Int, i::Int, f_bus::Int, t_bus::Int, f_idx::Tuple{Int,Int,Int},
+    f_connections::Vector{Int}, t_connections::Vector{Int},
+    r0::Matrix{<:Real}, x0::Matrix{<:Real}, tap1
+)
+    vr_fr = [_PMD.var(pm, nw, :vr, f_bus)[c] for c in f_connections]
+    vi_fr = [_PMD.var(pm, nw, :vi, f_bus)[c] for c in f_connections]
+    vr_to = [_PMD.var(pm, nw, :vr, t_bus)[c] for c in t_connections]
+    vi_to = [_PMD.var(pm, nw, :vi, t_bus)[c] for c in t_connections]
+
+    csr_fr = _PMD.var(pm, nw, :csr, f_idx[1])  
+    csi_fr = _PMD.var(pm, nw, :csi, f_idx[1])  
+
+    n = length(f_connections)
+    Δ = 2.4*(tap1 - 1.0)
+    
+    for p in 1:n
+        JuMP.@constraint(pm.model,
+            vr_to[p] == vr_fr[p] - (r0[p,p] + Δ)*csr_fr[p] + x0[p,p]*csi_fr[p]
+        )
+        JuMP.@constraint(pm.model,
+            vi_to[p] == vi_fr[p] - (r0[p,p] + Δ)*csi_fr[p] - x0[p,p]*csr_fr[p]
+        )
+    end
+end

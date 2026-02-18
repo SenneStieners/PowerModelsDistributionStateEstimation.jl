@@ -40,9 +40,9 @@ function build_mc_se_oltc(pm::_PMD.IVRENPowerModel)
         variable_mc_residual(pm, nw=n, bounded = true)
         variable_mc_measurement(pm, nw=n, bounded = false)
         variable_mc_transformer_tap(pm, nw=n, bounded = true)    # --- ADDED: Tap Estimation Variable ---
-        _PMD.variable_mc_switch_current(pm, nw=n, bounded = true)  # --- ADDED: Switch Current Variable ---
+        #_PMD.variable_mc_switch_current(pm, nw=n, bounded = true)  # --- ADDED: Switch Current Variable ---
     end
-
+    
     
 
     # Constraints
@@ -72,7 +72,7 @@ function build_mc_se_oltc(pm::_PMD.IVRENPowerModel)
         for i in _PMD.ids(pm, n, :branch)
             _PMD.constraint_mc_current_from(pm, i, nw = n)
             _PMD.constraint_mc_current_to(pm, i, nw = n)
-            _PMD.constraint_mc_bus_voltage_drop(pm, i, nw = n)
+            constraint_mc_bus_voltage_drop(pm, i, nw = n)
         end
 #
         for (i,bus) in _PMD.ref(pm, n, :bus)
@@ -110,7 +110,7 @@ function build_mc_se_oltc(pm::_PMD.IVRENPowerModel)
 
     #for i in _PMD.ids(pm, :transformer)
     #    constraint_mc_transformer_tap_equal_phase(pm, i)
-        #constraint_mc_transformer_tap_test(pm, i)   # --- ADDED: Tap Constraint ---
+    #    #constraint_mc_transformer_tap_test(pm, i)   # --- ADDED: Tap Constraint ---
     #end
     #for i in _PMD.ids(pm, :transformer)
     #    constraint_mc_transformer_voltage(pm, i,fix_taps=false)  # --- MODIFIED: fix_taps=false ---
