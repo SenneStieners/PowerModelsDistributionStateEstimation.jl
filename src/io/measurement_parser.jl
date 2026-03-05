@@ -142,7 +142,7 @@ function get_measures(model::DataType, cmp_type::String)
         # DONT # if cmp_type == "load-Δ"  return ["pd_bus","qd_bus"] end
         # DONT # if cmp_type == "load" return ["pd_bus","qd_bus"] end
         if cmp_type == "load" return ["pd","qd"] end
-        #if cmp_type == "gen"  return ["pg","qg"] end
+        if cmp_type == "gen"  return ["pg","qg"] end
         #if cmp_type == "gen-Δ"  return ["pg","qg"] end #doesn't happen -for now- but for completeness
     elseif model <: ThreeDeltaPowers
         if cmp_type == "bus"  return ["vmn"] end
@@ -482,6 +482,103 @@ function append_lv_bus_vrvi!(
     return csv_path
 end
 
+
+
+function append_lv_bus_vm!(
+    csv_path::String,
+    data::Dict,
+    pf::Dict;
+    tr_ids::Vector{String},
+    σ_bus::Float64 = 0.00334,
+    drop_neutral::Bool = false   # default false: keep neutral/ground if present
+)
+    df = _CSV.read(csv_path, _DFS.DataFrame)
+
+    vecstr(v) = "[" * join(string.(v), ", ") * "]"
+
+    # ---- meas_id next ----
+    next_id_int = isempty(df) ? 1 : (maximum(Int.(df.meas_id)) + 1)
+    meas_id_T = eltype(df.meas_id)
+    meas_id_val(i::Int) = meas_id_T <: Integer ? i : string(i)
+
+    # ---- cmp_id typing ----
+    cmp_id_T = eltype(df.cmp_id)
+    function cmp_id_val(bus_id_str::AbstractString)
+        if cmp_id_T <: Integer
+            x = tryparse(Int, bus_id_str)
+            x === nothing && error("cmp_id column is Int, but bus id '$bus_id_str' is not parseable to Int")
+            return x
+        else
+            return string(bus_id_str)
+        end
+    end
+
+    # ---- LV bus helper: compare f_vbase vs t_vbase ----
+    function lv_bus_id(tr::Dict)::String
+        fv = Float64(tr["f_vbase"])
+        tv = Float64(tr["t_vbase"])
+        return fv <= tv ? string(tr["f_bus"]) : string(tr["t_bus"])
+    end
+
+    # helper: expand vector to match terminals length (pads missing neutrals with 0.0)
+    function expand_to_terminals(vals::AbstractVector, terminals::AbstractVector{<:Integer})
+        nT = length(terminals)
+        nV = length(vals)
+        if nV == nT
+            return Float64.(vals)
+        elseif nV < nT
+            return vcat(Float64.(vals), zeros(nT - nV))
+        else
+            return Float64.(vals[1:nT])
+        end
+    end
+
+    for tr_id in tr_ids
+        tr = data["transformer"][tr_id]
+        b_str = lv_bus_id(tr)
+
+        terminals = data["bus"][b_str]["terminals"]
+        phases = drop_neutral ? filter(t -> t != 4 && t != 5, terminals) : terminals
+        isempty(phases) && continue
+
+        # skip duplicates
+        if repeated_measurement(df, b_str, "bus", phases)
+            continue
+        end
+
+        # ensure vr/vi exist, then compute vm = abs(vr + j*vi)
+        vr = pf["solution"]["bus"][b_str]["vr"]
+        vi = pf["solution"]["bus"][b_str]["vi"]
+
+        vr_e = expand_to_terminals(vr, phases)
+        vi_e = expand_to_terminals(vi, phases)
+
+        vm_vals = abs.(vr_e .+ vi_e .* im)
+
+        # sigma vector same length
+        sigs = get_sigma(σ_bus, "vm", phases)
+
+        row = Any[
+            meas_id_val(next_id_int),
+            "bus",
+            cmp_id_val(b_str),
+            "G",
+            "vm",
+            string(phases),
+            "Normal",
+            vecstr(vm_vals),
+            vecstr(sigs),
+            missing, missing, missing
+        ]
+
+        push!(df, row; promote=true)
+        next_id_int += 1
+    end
+
+    _CSV.write(csv_path, df)
+    return csv_path
+end
+
 function append_all_bus_vrvi!(
     csv_path::String,
     data::Dict,
@@ -576,4 +673,185 @@ function append_all_bus_vrvi!(
 
     _CSV.write(csv_path, df)
     return csv_path
+end
+
+function write_sm_measurements(PF_RES, math, measurements_file; σ=0.05, measurement_model =PowerModelsDistributionStateEstimation.IndustrialENMeasurementsModel )
+    dictify_solution!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
+    write_measurements!(measurement_model, math_meas_en, PF_RES, measurements_file, σ=σ) 
+end
+
+function dictify_solution!(pf_sol::Dict{String, Any}, math::Dict{String, Any}; formulation = "IVR")
+    solution_dictify_buses!(pf_sol, math; formulation = formulation)
+    solution_dictify_loads!(pf_sol, math; formulation = formulation)
+    solution_dictify_branches!(pf_sol, math; formulation = formulation)
+    solution_dictify_gens!(pf_sol, math; formulation = formulation)
+end
+
+function solution_dictify_buses!(pf_sol::Dict{String, Any}, math::Dict{String, Any};  formulation = "IVR")
+    fluff_bus_voltages!(pf_sol)
+    pf_sol = haskey(pf_sol,"solution") ? pf_sol["solution"] : pf_sol
+
+    for (b, bus) in math["bus"]
+        terminals = math["bus"][b]["terminals"]
+        # write a dictionary where the key is the terminal number and the value is the voltage at that terminal
+        pf_sol["bus"][b]["voltage"] = Dict(string(term) =>  pf_sol["bus"][b]["V"][i] for (i, term) in enumerate(terminals))
+    end 
+
+end
+function fluff_bus_voltages!(data::Dict{String, Any}) 
+    data = haskey(data,"solution") ? data["solution"] : data
+
+    for (_, bus) in data["bus"]
+        if  haskey(bus, "vr") && haskey(bus, "vi") 
+            bus["V"] = bus["vr"] .+ bus["vi"]*im
+            bus["vm"] = abs.(bus["V"])
+            bus["va"] = angle.(bus["V"])
+        elseif haskey(bus, "va") && haskey(bus, "vm") #TODO: check if when you apply the `solution_make_si` does the angles become in degrees ?
+            bus["V"] = bus["vm"] .* exp.(im.*bus["va"])
+            bus["vr"] = real.(bus["V"])
+            bus["vi"] = imag.(bus["V"])
+        else 
+            #warning_text("Can't fluff $(keys(bus)). Now I can just fluff the (`vr`, `vi`) and (`va`, `vm`) pairs.")
+        end 
+    end
+
+end 
+function solution_dictify_loads!(pf_sol::Dict{String, Any}, math::Dict{String, Any}; formulation = "IVR") 
+    # The idea is to create the complex current and power for each load and store it in the load dictionary under the key "current" and "power" respectively.
+    # The current is calculated as `I = P + Q*im` and the power is calculated as `S = P + Q*im`  
+    for (l, load) in pf_sol["load"]
+        terminals = math["load"][l]["connections"]
+
+        if !(math["load"][l]["configuration"] == DELTA)
+            
+            # Create current dictionary based on available keys
+            if haskey(load, "crd_bus") && haskey(load, "cid_bus")
+                load["current_bus"] = Dict(string(term) => load["crd_bus"][i] + load["cid_bus"][i]*im for (i, term) in enumerate(terminals))
+                load["power_bus"] = Dict(string(term) => pf_sol["bus"][string(math["load"][l]["load_bus"])]["voltage"][string(term)] * load["current_bus"][string(term)] for (i, term) in enumerate(terminals))
+            elseif haskey(load, "crd") && haskey(load, "cid")
+                load["current"] = Dict(string(term) => load["crd"][i] + load["cid"][i]*im for (i, term) in enumerate(terminals))
+                load["power"] = Dict(string(term) => pf_sol["bus"][string(math["load"][l]["load_bus"])]["voltage"][string(term)] * load["current"][string(term)] for (i, term) in enumerate(terminals))
+            end
+
+            # Create power dictionary based on available keys
+            if haskey(load, "pd_bus") && haskey(load, "qd_bus")
+                load["power"] = Dict(string(term) => load["pd_bus"][i] + load["qd_bus"][i]*im for (i, term) in enumerate(terminals))
+                @debug "added bus powers"
+            elseif haskey(load, "pd") && haskey(load, "qd")
+                load["power"] = Dict(string(term) => load["pd"][i] + load["qd"][i]*im for (i, term) in enumerate(terminals))
+                @debug "added load powers"
+            end  
+        else
+            terminals = setdiff(terminals, _N_IDX)
+                # Create current dictionary based on available keys
+                if haskey(load, "crd_bus") && haskey(load, "cid_bus")
+                    load["current_bus"] = Dict(string(term) => load["crd_bus"][i] + load["cid_bus"][i]*im for (i, term) in enumerate(terminals))
+                end
+
+                if haskey(load, "crd") && haskey(load, "cid")
+                    load["current"] = Dict(string(term) => load["crd"][i] + load["cid"][i]*im for (i, term) in enumerate(terminals))
+                end
+    
+                # Create power dictionary based on available keys
+                # if haskey(load, "pd_bus") && haskey(load, "qd_bus")
+                #     load["power_bus"] = Dict(string(term) => load["pd_bus"][i] + load["qd_bus"][i]*im for (i, term) in enumerate(terminals))
+                #     @debug "DELTA: added bus powers"
+                # end
+                if haskey(load, "pd") && haskey(load, "qd")
+                    load["power"] = Dict(string(term) => load["pd"][i] + load["qd"][i]*im for (i, term) in enumerate(terminals))
+                end  
+        end
+
+    end
+end 
+
+function solution_dictify_branches!(pf_sol::Dict{String, Any}, math::Dict{String, Any}; formulation = "IVR")
+    # The idea is to create the complex current and power for each branch and store it in the branch dictionary under the key "current" and "power" respectively.
+    # The current is calculated as `I = P + Q*im` and the power is calculated as `S = P + Q*im`  
+    for (b, branch) in math["branch"]
+        f_terminals = math["branch"][b]["f_connections"]
+        t_terminals = math["branch"][b]["t_connections"]
+        # write a dictionary where the key is the terminal number and the value is the current at that terminal
+        branch = pf_sol["branch"][b]
+        branch["current_from"] = Dict(string(term) => branch["cr_fr"][i] + branch["ci_fr"][i]*im for (i, term) in enumerate(f_terminals))
+        haskey(branch, "csr_fr") ? branch["shunt_current_from"] = Dict(string(term) => branch["csr_fr"][i] + branch["csi_fr"][i]*im for (i, term) in enumerate(f_terminals)) : nothing
+        branch["current_to"] = Dict(string(term) => branch["cr_to"][i] + branch["ci_to"][i]*im for (i, term) in enumerate(t_terminals))
+        haskey(branch, "csr_to") ? branch["shunt_current_to"] = Dict(string(term) => branch["csr_to"][i] + branch["csi_to"][i]*im for (i, term) in enumerate(t_terminals)) : nothing
+        branch["power_from"] = Dict(string(term) => branch["pf"][i] + branch["qf"][i]*im for (i, term) in enumerate(f_terminals))
+        branch["power_to"] = Dict(string(term) => branch["pt"][i] + branch["qt"][i]*im for (i, term) in enumerate(t_terminals))
+    end
+end
+
+function solution_dictify_gens!(pf_sol::Dict{String, Any}, math::Dict{String, Any}; formulation = "IVR")
+    # The idea is to create the complex current and power for each generator and store it in the generator dictionary under the key "current" and "power" respectively.
+    # The current is calculated as `I = P + Q*im` and the power is calculated as `S = P + Q*im`  
+    for (g, gen) in pf_sol["gen"]
+        terminals = setdiff(math["gen"][g]["connections"], [4]) 
+        # write a dictionary where the key is the terminal number and the value is the current at that terminal
+        gen["current"] = Dict(string(term) => gen["crg"][i] + gen["cig"][i]*im for (i, term) in enumerate(terminals))
+        haskey(gen, "pg") || haskey(gen, "pg_bus") ? gen["power"] = Dict(string(term) => gen["pg"][i] + gen["qg"][i]*im for (i, term) in enumerate(terminals)) : nothing
+    end
+end
+
+
+
+function add_vmn_p_q(math, pf_sol)
+    math_meas = deepcopy(math)
+    _get_vmn(pf_sol, math, math_meas)
+    _get_pd_qd(pf_sol, math, math_meas)
+    _add_delta_readings(pf_sol, math, math_meas)
+    return math_meas
+end
+
+function _get_vmn(pf_sol, math, math_meas)
+    for (b, bus) in pf_sol["bus"]
+        pvs, vn = _separate_phase_neutral_voltages(pf_sol, b)
+        vmn = abs.(pvs .- vn)
+        bus["vmn"] = vmn
+        math_meas["bus"][b]["terminals"] = setdiff(math["bus"][b]["terminals"], _N_IDX)
+    end
+end
+
+function _separate_phase_neutral_voltages(pf_sol, bus_index)
+    phase_voltage = ComplexF64[]
+    for i in 1:3 
+        if haskey(pf_sol["bus"][bus_index]["voltage"], string(i))
+            push!(phase_voltage, pf_sol["bus"][bus_index]["voltage"][string(i)])
+        end
+    end
+
+    neutral_voltage = ComplexF64[]
+
+    if haskey(pf_sol["bus"][bus_index]["voltage"], string(_N_IDX))  
+        neutral_voltage = pf_sol["bus"][bus_index]["voltage"][string(_N_IDX)]
+    else 
+        neutral_voltage = 0 + 0im # assuming grounded
+    end
+
+    return phase_voltage, neutral_voltage
+end
+
+function _get_pd_qd(pf_sol, math, math_meas)
+    for (l, _) in pf_sol["load"]
+        math_meas["load"][l]["connections"] = setdiff(math["load"][l]["connections"], _N_IDX)
+    end
+end
+
+function _add_delta_readings(pf_sol, math, math_meas)
+
+    for (l, load) in math["load"]
+        if load["configuration"] == _PMD.DELTA
+            pf_sol["load"][l]["ptot"] = [sum(real(value) for (key, value) in pf_sol["load"][l]["power"])]
+            pf_sol["load"][l]["qtot"] = [sum(imag(value) for (key, value) in pf_sol["load"][l]["power"])]
+            
+            #pf_sol["load"][l]["ptot"] = [sum(real(value) for (key, value) in pf_sol["load"][l]["power_bus"])]
+            #pf_sol["load"][l]["qtot"] = [sum(imag(value) for (key, value) in pf_sol["load"][l]["power_bus"])]
+
+
+            load_bus = pf_sol["bus"][string(load["load_bus"])]
+            load_bus["vll"] = sqrt.([ (load_bus["vr"][x] - load_bus["vr"][y] )^2 + (load_bus["vi"][x] - load_bus["vi"][y] )^2 for (x,y) in [(1,2), (2,3), (3,1)]])
+        end
+    end
+return math_meas
 end

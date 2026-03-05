@@ -745,14 +745,16 @@ function constraint_mc_bus_voltage_drop_tap(pm::_PMD.AbstractExplicitNeutralIVRM
     csi_fr = _PMD.var(pm, nw, :csi, f_idx[1])  
 
     n = length(f_connections)
-    Δ = 2.4*(tap1 - 1.0)
     
     for p in 1:n
+        r_eff = r0[p,p] / tap1
+
         JuMP.@constraint(pm.model,
-            vr_to[p] == vr_fr[p] - (r0[p,p] + Δ)*csr_fr[p] + x0[p,p]*csi_fr[p]
+            vr_to[p] == vr_fr[p] - r_eff*csr_fr[p] + x0[p,p]*csi_fr[p]
         )
+        println("tap1: ", tap1, " r_eff: ", r_eff)
         JuMP.@constraint(pm.model,
-            vi_to[p] == vi_fr[p] - (r0[p,p] + Δ)*csi_fr[p] - x0[p,p]*csr_fr[p]
+            vi_to[p] == vi_fr[p] - r_eff*csi_fr[p] - x0[p,p]*csr_fr[p]
         )
     end
 end
