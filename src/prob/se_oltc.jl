@@ -72,7 +72,7 @@ function build_mc_se_oltc(pm::_PMD.IVRENPowerModel)
         for i in _PMD.ids(pm, n, :branch)
             _PMD.constraint_mc_current_from(pm, i, nw = n)
             _PMD.constraint_mc_current_to(pm, i, nw = n)
-            constraint_mc_bus_voltage_drop(pm, i, nw = n)
+            _PMD.constraint_mc_bus_voltage_drop(pm, i, nw = n)
         end
 #
         for (i,bus) in _PMD.ref(pm, n, :bus)
