@@ -399,13 +399,16 @@ end
 function variable_mc_transformer_tap(pm::_PMD.AbstractUnbalancedPowerModel;
     nw::Int=_IM.nw_id_default, bounded::Bool=true, report::Bool=true
 )
-    p_oltc_ids = [id for (id, tr) in _PMD.ref(pm, nw, :transformer)
-                 if endswith(string(get(tr, "source_id", "")), ".2")]
+    #p_oltc_ids = [id for (id, tr) in _PMD.ref(pm, nw, :transformer)
+     #            if endswith(string(get(tr, "source_id", "")), ".2")]
 
     # enkel trafos waarvoor NIET alles fixed is (dus Bool[0,0,0] -> variabelen; Bool[1,1,1] -> skip)
-    p_oltc_var_ids = [i for i in p_oltc_ids
-                      if !all(_PMD.ref(pm, nw, :transformer, i, "tm_fix"))]
+    #p_oltc_var_ids = [i for i in p_oltc_ids
+    #                  if !all(_PMD.ref(pm, nw, :transformer, i, "tm_fix"))]
 
+    p_oltc_var_ids = [i for (i, tr) in _PMD.ref(pm, nw, :transformer)
+                  if !all(get(tr, "tm_fix", Bool[1,1,1]))]
+                    
     tap = _PMD.var(pm, nw)[:tap] = Dict(i => JuMP.@variable(pm.model,
         [p in 1:length(_PMD.ref(pm, nw, :transformer, i, "tm_set"))],
         base_name="$(nw)_tm_$(i)",
