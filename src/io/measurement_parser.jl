@@ -8,8 +8,9 @@
 
 abstract type IndustrialENMeasurementsModel end
 abstract type ThreeDeltaPowers end
-
-
+struct IndustrialENMeasurementsModelTestcase2 <: IndustrialENMeasurementsModel end
+struct IndustrialENMeasurementsModelTestcase3 <: IndustrialENMeasurementsModel end
+struct IndustrialENMeasurementsModelTestcase4 <: IndustrialENMeasurementsModel end
 ## CSV to measurement parser
 function dataString_to_array(input::AbstractString)::Array
     if occursin("[", input) && occursin("]", input)
@@ -160,6 +161,29 @@ function get_measures(model::DataType, cmp_type::String)
     end
     return []
 end
+
+function get_measures(::Type{IndustrialENMeasurementsModelTestcase2}, cmp_type::String)
+    if cmp_type == "bus"    return ["vmn"] end
+    if cmp_type == "load"   return ["pd","qd"] end
+    if cmp_type == "gen"    return ["ptot","qtot"] end
+    return []
+end
+
+function get_measures(::Type{IndustrialENMeasurementsModelTestcase3}, cmp_type::String)
+    if cmp_type == "bus"    return ["vmn"] end 
+    if cmp_type == "load"   return ["ptot","qtot"] end
+    if cmp_type == "gen"    return ["pg","qg"] end
+    return []
+end
+
+function get_measures(::Type{IndustrialENMeasurementsModelTestcase4}, cmp_type::String)
+    if cmp_type == "bus"    return ["vmn"] end 
+    if cmp_type == "load"   return ["ptot","qtot"] end
+    if cmp_type == "gen"    return ["ptot","qtot"] end
+    return []
+end
+
+
 function reduce_name(meas_var::String)
     if meas_var == "crd_bus" return "crd" end
     if meas_var == "cid_bus" return "cid" end
@@ -681,6 +705,24 @@ function write_sm_measurements(PF_RES, math, measurements_file; σ=0.05, measure
     write_measurements!(measurement_model, math_meas_en, PF_RES, measurements_file, σ=σ) 
 end
 
+function write_Testcase2_measurements(PF_RES, math, measurements_file;σ=0.05)
+    dictify_solution!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q_2(math, PF_RES["solution"])
+    write_measurements!(IndustrialENMeasurementsModelTestcase2, math_meas_en, PF_RES, measurements_file, σ=σ)
+end
+
+function write_Testcase3_measurements(PF_RES, math, measurements_file;σ=0.05)
+    dictify_solution!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q_3(math, PF_RES["solution"])
+    write_measurements!(IndustrialENMeasurementsModelTestcase3, math_meas_en, PF_RES, measurements_file, σ=σ)
+end
+
+function write_Testcase4_measurements(PF_RES, math, measurements_file;σ=0.05)
+    dictify_solution!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q_4(math, PF_RES["solution"])
+    write_measurements!(IndustrialENMeasurementsModelTestcase4, math_meas_en, PF_RES, measurements_file, σ=σ)
+end
+
 function dictify_solution!(pf_sol::Dict{String, Any}, math::Dict{String, Any}; formulation = "IVR")
     solution_dictify_buses!(pf_sol, math; formulation = formulation)
     solution_dictify_loads!(pf_sol, math; formulation = formulation)
@@ -794,13 +836,72 @@ function solution_dictify_gens!(pf_sol::Dict{String, Any}, math::Dict{String, An
     end
 end
 
+function _add_gen_ptot_qtot!(pf_sol, math)
+    # Zorgt dat elke gen (met pg/qg) ook ptot en qtot krijgt als 1-element vector.
+    for (g, gen) in pf_sol["gen"]
+        # Neem alle faseterminals behalve neutral
+        terminals = setdiff(math["gen"][g]["connections"], [_N_IDX])
 
+        if haskey(gen, "pg") && haskey(gen, "qg")
+            # Sommeer over de fasen
+            ptot = sum(gen["pg"][i] for (i, _) in enumerate(terminals))
+            qtot = sum(gen["qg"][i] for (i, _) in enumerate(terminals))
 
+            gen["ptot"] = [ptot]
+            gen["qtot"] = [qtot]
+        end
+    end
+end
+
+function _add_load_ptot_qtot!(pf_sol, math)
+    # Zorgt dat elke gen (met pg/qg) ook ptot en qtot krijgt als 1-element vector.
+    for (l, load) in pf_sol["load"]
+        # Neem alle faseterminals behalve neutral
+        terminals = setdiff(math["load"][l]["connections"], [_N_IDX])
+
+        if haskey(load, "pd") && haskey(load, "qd")
+            # Sommeer over de fasen
+            ptot = sum(load["pd"][i] for (i, _) in enumerate(terminals))
+            qtot = sum(load["qd"][i] for (i, _) in enumerate(terminals))
+
+            load["ptot"] = [ptot]
+            load["qtot"] = [qtot]
+        end
+    end
+end
 function add_vmn_p_q(math, pf_sol)
     math_meas = deepcopy(math)
     _get_vmn(pf_sol, math, math_meas)
     _get_pd_qd(pf_sol, math, math_meas)
     _add_delta_readings(pf_sol, math, math_meas)
+    return math_meas
+end
+
+function add_vmn_p_q_2(math, pf_sol)
+    math_meas = deepcopy(math)
+    _get_vmn(pf_sol, math, math_meas)
+    _get_pd_qd(pf_sol, math, math_meas)
+    _add_delta_readings(pf_sol, math, math_meas)
+    _add_gen_ptot_qtot!(pf_sol, math)   # <<-- NIEUW
+    return math_meas
+end
+
+function add_vmn_p_q_3(math, pf_sol)
+    math_meas = deepcopy(math)
+    _get_vmn(pf_sol, math, math_meas)
+    #??? _get_pd_qd(pf_sol, math, math_meas)
+    _add_delta_readings(pf_sol, math, math_meas)
+    _add_load_ptot_qtot!(pf_sol, math)   # <<-- NIEUW
+    return math_meas
+end
+
+function add_vmn_p_q_3(math, pf_sol)
+    math_meas = deepcopy(math)
+    _get_vmn(pf_sol, math, math_meas)
+    #??? _get_pd_qd(pf_sol, math, math_meas)
+    _add_delta_readings(pf_sol, math, math_meas)
+     _add_gen_ptot_qtot!(pf_sol, math)   # <<-- NIEUW   
+    _add_load_ptot_qtot!(pf_sol, math)   # <<-- NIEUW
     return math_meas
 end
 
