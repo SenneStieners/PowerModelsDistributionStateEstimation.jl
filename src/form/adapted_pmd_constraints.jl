@@ -459,7 +459,7 @@ function calculate_tm_scale(trans::Dict{String,Any}, bus_fr::Dict{String,Any}, b
     config = trans["configuration"]
 
     tm_scale = tm_nom
-    if config == DELTA
+    if config == _PMD.DELTA
         #TODO is this still needed?
         #tm_scale *= sqrt(3)
     elseif config == "zig-zag"
