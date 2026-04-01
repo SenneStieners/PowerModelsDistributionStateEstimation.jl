@@ -183,9 +183,28 @@ function assign_conversion_type_to_msr(pm::_PMD.AbstractUnbalancedIVRModel,i,msr
     elseif msr == :qd
         msr_type = Multiplication(msr, i,:load, cmp_id, _PMD.ref(pm,nw,:load,cmp_id)["load_bus"], [:crd, :cid], [:vr, :vi])
     elseif msr ∈ [:qtot, :ptot]
-        cmp_string = String(_PMD.ref(pm,nw,:meas,i)["cmp"]) # "load" or "gen"
-        cmp_symb = _PMD.ref(pm,nw,:meas,i)["cmp"] #:load or :gen
-        msr_type = PowerSum(msr, i, cmp_symb, cmp_id, _PMD.ref(pm,nw,cmp_symb,cmp_id)["$(cmp_string)_bus"], [:cr, :ci], [:vr, :vi])  # _PMD.ref(pm,nw,:meas,i)["cmp"] -> :gen or :bus
+        cmp_symb = _PMD.ref(pm,nw,:meas,i)["cmp"]
+
+        if cmp_symb == :branch
+            br = _PMD.ref(pm, nw, :branch, cmp_id)
+
+            # kies standaard de from-side bus
+
+            bus_ind = br["f_bus"] # als t bus neemt zou het hetzelfde moeten zijn
+
+            msr_type = PowerSum(msr, i, :branch, cmp_id, bus_ind, [:cr, :ci], [:vr, :vi])
+        else
+            cmp_string = String(cmp_symb)
+            msr_type = PowerSum(
+                msr,
+                i,
+                cmp_symb,
+                cmp_id,
+                _PMD.ref(pm,nw,cmp_symb,cmp_id)["$(cmp_string)_bus"],
+                [:cr, :ci],
+                [:vr, :vi]
+            )
+        end
     else
        error("the chosen measurement $(msr) at $(_PMD.ref(pm, nw, :meas, i, "cmp")) $(_PMD.ref(pm, nw, :meas, i, "cmp_id")) is not supported and should be removed")
     end
@@ -598,8 +617,47 @@ end
 #                                                               ↗  :ptot || :qtot         ↗ PowerSum(msr, i,:gen, cmp_id, _PMD.ref(pm,nw,:gen,cmp_id)["gen_bus"], [:crg, :cig], [:vr, :vi])
 function create_conversion_constraint(pm::_PMD.IVRENPowerModel, original_var, msr::PowerSum; nw=nw)
 
-    # decide if its a load or a generator
-    cmp_indication =    msr.cmp_type == :load ? "d" : msr.cmp_type == :gen ? "g" : ""
+    # Branch total power measurement
+    if msr.cmp_type == :branch
+        br = _PMD.ref(pm, nw, :branch, msr.cmp_id)
+
+        f_bus = br["f_bus"]
+        t_bus = br["t_bus"]
+
+        var_key = (msr.cmp_id, f_bus, t_bus)
+
+        if msr.bus_ind == f_bus
+            arc_key = (msr.cmp_id, f_bus, t_bus)
+        elseif msr.bus_ind == t_bus
+            arc_key = (msr.cmp_id, t_bus, f_bus)
+        else
+            error("Bus $(msr.bus_ind) is geen eindpunt van branch $(msr.cmp_id)")
+        end
+
+        vr = _PMD.var(pm, nw, :vr, msr.bus_ind)
+        vi = _PMD.var(pm, nw, :vi, msr.bus_ind)
+        
+        cr = _PMD.var(pm, nw, :cr, arc_key)
+        ci = _PMD.var(pm, nw, :ci, arc_key)
+
+        conn = get_active_connections(pm, nw, :branch, msr.cmp_id)
+        conn = setdiff(conn, _N_IDX)
+
+        if occursin("p", String(msr.msr_sym))
+            JuMP.@constraint(pm.model,
+                original_var[var_key][1] - sum(cr[c]*(vr[c]-vr[_N_IDX])+ci[c]*(vi[c]-vi[_N_IDX]) for c in conn) == 0
+            )
+        elseif occursin("q", String(msr.msr_sym))
+            JuMP.@constraint(pm.model,
+                original_var[var_key][1] - sum(-ci[c]*(vr[c]-vr[_N_IDX])+cr[c]*(vi[c]-vi[_N_IDX]) for c in conn) == 0
+            )
+        end
+
+        return
+    end
+
+    # Load / generator total power measurement
+    cmp_indication =  msr.cmp_type == :load ? "d" : msr.cmp_type == :gen ? "g" : ""
     cs = Symbol.(String.(msr.arr1).*cmp_indication)
     vs = msr.arr2
     vr = _PMD.var(pm,nw, vs[1],msr.bus_ind)
