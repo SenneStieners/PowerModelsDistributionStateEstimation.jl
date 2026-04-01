@@ -8,9 +8,12 @@
 
 abstract type IndustrialENMeasurementsModel end
 abstract type ThreeDeltaPowers end
+struct IndustrialENMeasurementsModelTestcase1 <: IndustrialENMeasurementsModel end
 struct IndustrialENMeasurementsModelTestcase2 <: IndustrialENMeasurementsModel end
 struct IndustrialENMeasurementsModelTestcase3 <: IndustrialENMeasurementsModel end
+struct IndustrialENMeasurementsModelTestcase3_2 <: IndustrialENMeasurementsModel end
 struct IndustrialENMeasurementsModelTestcase4 <: IndustrialENMeasurementsModel end
+struct IndustrialENMeasurementsModelTestcase4_2 <: IndustrialENMeasurementsModel end
 ## CSV to measurement parser
 function dataString_to_array(input::AbstractString)::Array
     if occursin("[", input) && occursin("]", input)
@@ -132,7 +135,14 @@ function get_measures(model::DataType, cmp_type::String)
         if cmp_type == "bus"  return ["w"] end
         if cmp_type == "gen"  return ["pg","qg"] end
         if cmp_type == "load" return ["pd","qd"] end
-    elseif model <: IndustrialENMeasurementsModel
+    elseif model <: IndustrialENMeasurementsModel &&
+        !(model <: IndustrialENMeasurementsModelTestcase1) &&
+        !(model <: IndustrialENMeasurementsModelTestcase2) &&
+        !(model <: IndustrialENMeasurementsModelTestcase3) &&
+        !(model <: IndustrialENMeasurementsModelTestcase3_2) &&
+        !(model <: IndustrialENMeasurementsModelTestcase4) &&
+        !(model <: IndustrialENMeasurementsModelTestcase4_2)
+
         if cmp_type == "bus"  return ["vmn"] end
         #if cmp_type == "bus"  return ["vr","vi"] end
         if cmp_type == "bus-Δ"  return ["vll"] end
@@ -158,7 +168,15 @@ function get_measures(model::DataType, cmp_type::String)
         if cmp_type == "load" return ["pd","qd"] end
         if cmp_type == "gen"  return ["pg","qg"] end
         #if cmp_type == "gen-Δ"  return ["pg","qg"] end #doesn't happen -for now- but for completeness
+        # testcase-modellen
     end
+    return []
+end
+
+function get_measures(::Type{IndustrialENMeasurementsModelTestcase1}, cmp_type::String)
+    if cmp_type == "bus"    return ["vmn"] end
+    if cmp_type == "load"   return ["pd","qd"] end
+    if cmp_type == "gen"  return ["pg","qg"] end
     return []
 end
 
@@ -176,6 +194,12 @@ function get_measures(::Type{IndustrialENMeasurementsModelTestcase3}, cmp_type::
     return []
 end
 
+function get_measures(::Type{IndustrialENMeasurementsModelTestcase3_2}, cmp_type::String) 
+    if cmp_type == "gen"    return ["pg","qg"] end
+    return []
+end 
+
+
 function get_measures(::Type{IndustrialENMeasurementsModelTestcase4}, cmp_type::String)
     if cmp_type == "bus"    return ["vmn"] end 
     if cmp_type == "load"   return ["ptot","qtot"] end
@@ -183,6 +207,10 @@ function get_measures(::Type{IndustrialENMeasurementsModelTestcase4}, cmp_type::
     return []
 end
 
+function get_measures(::Type{IndustrialENMeasurementsModelTestcase4_2}, cmp_type::String)
+    if cmp_type == "gen"    return ["ptot","qtot"] end
+    return []
+end 
 
 function reduce_name(meas_var::String)
     if meas_var == "crd_bus" return "crd" end
@@ -217,7 +245,7 @@ init_measurements() =
    Function to write the dataframe row for a Normal component
 """
 function write_cmp_measurement!(df::_DFS.DataFrame, model::Type, cmp_id::String, cmp_type::String, cmp_data::Dict{String,Any},
-                                        cmp_res::Dict{String,Any}, phases, very_basic_case::Bool; exclude::Vector{String}=String[], σ::Float64)
+                                        cmp_res::AbstractDict{String}, phases, very_basic_case::Bool; exclude::Vector{String}=String[], σ::Float64)
 
     ph = [1:length(phases)...]
 
@@ -603,124 +631,49 @@ function append_lv_bus_vm!(
     return csv_path
 end
 
-function append_all_bus_vrvi!(
-    csv_path::String,
-    data::Dict,
-    pf::Dict;
-    σ_bus::Float64 = 0.00334,
-    drop_neutral::Bool = false   # default: keep neutral/ground
-)
-    df = _CSV.read(csv_path, _DFS.DataFrame)
-
-    vecstr(v) = "[" * join(string.(v), ", ") * "]"
-
-    # ---- meas_id next ----
-    next_id_int = isempty(df) ? 1 : (maximum(Int.(df.meas_id)) + 1)
-    meas_id_T = eltype(df.meas_id)
-    meas_id_val(i::Int) = meas_id_T <: Integer ? i : string(i)
-
-    # ---- cmp_id typing ----
-    cmp_id_T = eltype(df.cmp_id)
-    function cmp_id_val(bus_id_str::AbstractString)
-        if cmp_id_T <: Integer
-            x = tryparse(Int, bus_id_str)
-            x === nothing && error("cmp_id column is Int, but bus id '$bus_id_str' is not parseable to Int")
-            return x
-        else
-            return string(bus_id_str)
-        end
-    end
-
-    # helper: expand pf vector to match terminals length (pads missing neutrals with 0.0)
-    function expand_to_terminals(vals::AbstractVector, terminals::AbstractVector{<:Integer})
-        nT = length(terminals)
-        nV = length(vals)
-        if nV == nT
-            return Float64.(vals)
-        elseif nV < nT
-            return vcat(Float64.(vals), zeros(nT - nV))
-        else
-            return Float64.(vals[1:nT])
-        end
-    end
-
-    # iter over ALL buses present in pf (safe default)
-    bus_ids = sort(collect(keys(pf["solution"]["bus"]))) do a, b
-        ia = tryparse(Int, String(a)); ib = tryparse(Int, String(b))
-        ia === nothing || ib === nothing ? String(a) < String(b) : ia < ib
-    end
-
-    for b_str_any in bus_ids
-        b_str = string(b_str_any)
-
-        # terminals from data (source of truth for phases)
-        haskey(data["bus"], b_str) || continue
-        terminals = data["bus"][b_str]["terminals"]
-        phases = drop_neutral ? filter(t -> t != 4 && t != 5, terminals) : terminals
-        isempty(phases) && continue
-
-        # skip duplicates
-        if repeated_measurement(df, b_str, "bus", phases)
-            continue
-        end
-
-        # need vr/vi in pf; if not present, skip this bus
-        bus_sol = pf["solution"]["bus"][b_str]
-        (haskey(bus_sol, "vr") && haskey(bus_sol, "vi")) || continue
-
-        for meas_var in ("vr", "vi")
-            pf_vec = bus_sol[meas_var]
-
-            # match length to phases/terminals
-            vals = expand_to_terminals(pf_vec, phases)
-
-            # sigma vector same length
-            sigs = get_sigma(σ_bus, meas_var, phases)
-
-            row = Any[
-                meas_id_val(next_id_int),
-                "bus",
-                cmp_id_val(b_str),
-                "G",
-                meas_var,
-                string(phases),
-                "Normal",
-                vecstr(vals),
-                vecstr(sigs),
-                missing, missing, missing
-            ]
-
-            push!(df, row; promote=true)
-            next_id_int += 1
-        end
-    end
-
-    _CSV.write(csv_path, df)
-    return csv_path
-end
 
 function write_sm_measurements(PF_RES, math, measurements_file; σ=0.05, measurement_model =PowerModelsDistributionStateEstimation.IndustrialENMeasurementsModel )
+    dictify_solution!(PF_RES["solution"], math) # convert PF results to usable dict (voltages, power, currents)
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"]) # add vmn to buses and ptot/qtot to loads & generators in PF solution, and adjust terminals/connections in math copy
+    write_measurements!(measurement_model, math_meas_en, PF_RES, measurements_file, σ=σ) # generate a CSV file with measurements by taking values from PF_RES["solution"] (e.g. vmn, pd/qd, ptot/qtot), using math_meas_en for structure (phases, connections), selecting which variables to include via measurement_model (get_measures), and adding noise based on σ
+end
+
+function write_Testcase1_measurements(PF_RES, math, measurements_file;σ=0.05)
     dictify_solution!(PF_RES["solution"], math)
     math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
-    write_measurements!(measurement_model, math_meas_en, PF_RES, measurements_file, σ=σ) 
+    write_measurements!(IndustrialENMeasurementsModelTestcase1, math_meas_en, PF_RES, measurements_file, σ=σ)
 end
 
 function write_Testcase2_measurements(PF_RES, math, measurements_file;σ=0.05)
     dictify_solution!(PF_RES["solution"], math)
-    math_meas_en = add_vmn_p_q_2(math, PF_RES["solution"])
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
+    println("testtttttttttttttttrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr")
     write_measurements!(IndustrialENMeasurementsModelTestcase2, math_meas_en, PF_RES, measurements_file, σ=σ)
 end
 
 function write_Testcase3_measurements(PF_RES, math, measurements_file;σ=0.05)
-    dictify_solution!(PF_RES["solution"], math)
-    math_meas_en = add_vmn_p_q_3(math, PF_RES["solution"])
+    dictify_solution_no_loads!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
     write_measurements!(IndustrialENMeasurementsModelTestcase3, math_meas_en, PF_RES, measurements_file, σ=σ)
 end
 
+function write_Testcase3_2_measurements(PF_RES, math, measurements_file;σ=0.05)
+    dictify_solution_no_loads!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
+    write_measurements!(IndustrialENMeasurementsModelTestcase3_2, math_meas_en, PF_RES, measurements_file, σ=σ)
+end
+
+
 function write_Testcase4_measurements(PF_RES, math, measurements_file;σ=0.05)
-    dictify_solution!(PF_RES["solution"], math)
-    math_meas_en = add_vmn_p_q_4(math, PF_RES["solution"])
+    dictify_solution_no_loads!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
     write_measurements!(IndustrialENMeasurementsModelTestcase4, math_meas_en, PF_RES, measurements_file, σ=σ)
+end
+
+function write_Testcase4_2_measurements(PF_RES, math, measurements_file;σ=0.05)
+    dictify_solution_no_loads!(PF_RES["solution"], math)
+    math_meas_en = add_vmn_p_q(math, PF_RES["solution"])
+    write_measurements!(IndustrialENMeasurementsModelTestcase4_2, math_meas_en, PF_RES, measurements_file, σ=σ)
 end
 
 function dictify_solution!(pf_sol::Dict{String, Any}, math::Dict{String, Any}; formulation = "IVR")
@@ -765,7 +718,7 @@ function solution_dictify_loads!(pf_sol::Dict{String, Any}, math::Dict{String, A
     for (l, load) in pf_sol["load"]
         terminals = math["load"][l]["connections"]
 
-        if !(math["load"][l]["configuration"] == DELTA)
+        if !(math["load"][l]["configuration"] == _PMD.DELTA)
             
             # Create current dictionary based on available keys
             if haskey(load, "crd_bus") && haskey(load, "cid_bus")
@@ -874,36 +827,11 @@ function add_vmn_p_q(math, pf_sol)
     _get_vmn(pf_sol, math, math_meas)
     _get_pd_qd(pf_sol, math, math_meas)
     _add_delta_readings(pf_sol, math, math_meas)
-    return math_meas
-end
-
-function add_vmn_p_q_2(math, pf_sol)
-    math_meas = deepcopy(math)
-    _get_vmn(pf_sol, math, math_meas)
-    _get_pd_qd(pf_sol, math, math_meas)
-    _add_delta_readings(pf_sol, math, math_meas)
-    _add_gen_ptot_qtot!(pf_sol, math)   # <<-- NIEUW
-    return math_meas
-end
-
-function add_vmn_p_q_3(math, pf_sol)
-    math_meas = deepcopy(math)
-    _get_vmn(pf_sol, math, math_meas)
-    #??? _get_pd_qd(pf_sol, math, math_meas)
-    _add_delta_readings(pf_sol, math, math_meas)
+    _add_gen_ptot_qtot!(pf_sol, math)   # <<-- NIEUW   
     _add_load_ptot_qtot!(pf_sol, math)   # <<-- NIEUW
     return math_meas
 end
 
-function add_vmn_p_q_3(math, pf_sol)
-    math_meas = deepcopy(math)
-    _get_vmn(pf_sol, math, math_meas)
-    #??? _get_pd_qd(pf_sol, math, math_meas)
-    _add_delta_readings(pf_sol, math, math_meas)
-     _add_gen_ptot_qtot!(pf_sol, math)   # <<-- NIEUW   
-    _add_load_ptot_qtot!(pf_sol, math)   # <<-- NIEUW
-    return math_meas
-end
 
 function _get_vmn(pf_sol, math, math_meas)
     for (b, bus) in pf_sol["bus"]
@@ -955,4 +883,10 @@ function _add_delta_readings(pf_sol, math, math_meas)
         end
     end
 return math_meas
+end
+function dictify_solution_no_loads!(pf_sol, math; formulation = "IVR")
+    solution_dictify_buses!(pf_sol, math; formulation=formulation)
+    solution_dictify_branches!(pf_sol, math; formulation=formulation)
+    solution_dictify_gens!(pf_sol, math; formulation=formulation)
+    # LET OP: geen solution_dictify_loads! hier
 end
