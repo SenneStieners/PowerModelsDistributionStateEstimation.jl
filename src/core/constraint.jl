@@ -15,7 +15,11 @@ function constraint_mc_residual(pm::_PMD.AbstractUnbalancedPowerModel, i::Int; n
 
     cmp_id = get_cmp_id(pm, nw, i)
     res = _PMD.var(pm, nw, :res, i)
-    var = _PMD.var(pm, nw, _PMD.ref(pm, nw, :meas, i, "var"), cmp_id)
+    msr_var = _PMD.ref(pm, nw, :meas, i, "var")
+    cmp_type = _PMD.ref(pm, nw, :meas, i, "cmp")
+
+    var_key = no_conversion_needed(pm, msr_var) ? msr_var : Symbol("$(cmp_type)_$(msr_var)")
+    var = _PMD.var(pm, nw, var_key, cmp_id)
     dst = _PMD.ref(pm, nw, :meas, i, "dst")
     rsc = _PMD.ref(pm, nw, :se_settings)["rescaler"]
     crit = _PMD.ref(pm, nw, :meas, i, "crit")
