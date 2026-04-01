@@ -276,7 +276,24 @@ function get_active_connections(pm::_PMD.AbstractUnbalancedPowerModel, nw::Int, 
         return active_conn
 end
 
+function get_active_connections(
+    pm::_PMD.AbstractUnbalancedPowerModel,
+    nw::Int,
+    cmp_type::Symbol,
+    cmp_id::Tuple
+)
+    return get_active_connections(pm, nw, cmp_type, cmp_id[1])
+end
 
+function get_active_connections(
+    pm::_PMD.AbstractUnbalancedPowerModel,
+    nw::Int,
+    cmp_type::Symbol,
+    cmp_id::Tuple,
+    msr_var::Symbol
+)
+    return get_active_connections(pm, nw, cmp_type, cmp_id[1], msr_var)
+end
 
 
 """
